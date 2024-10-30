@@ -1,3 +1,4 @@
+# VPC Setup
 resource "aws_vpc" "db_monitor_vpc" {
   cidr_block = var.vpc_cidr
   enable_dns_support = true
@@ -8,6 +9,7 @@ resource "aws_vpc" "db_monitor_vpc" {
   }
 }
 
+# Public Subnets
 resource "aws_subnet" "public_subnet_a" {
   vpc_id                  = aws_vpc.db_monitor_vpc.id
   cidr_block              = var.public_subnet_cidrs[0]
@@ -30,6 +32,7 @@ resource "aws_subnet" "public_subnet_b" {
   }
 }
 
+# Private Subnet
 resource "aws_subnet" "private_subnet_a" {
   vpc_id            = aws_vpc.db_monitor_vpc.id
   cidr_block        = var.private_subnet_cidrs[0]
@@ -50,3 +53,47 @@ resource "aws_subnet" "private_subnet_b" {
   }
 }
 
+# RDS Instance
+resource "aws_db_instance" "db_monitor_rds" {
+  identifier               = var.db_instance_name
+  engine                   = var.db_engine
+  engine_version           = var.db_engine_version
+  instance_class           = var.db_instance_class
+  allocated_storage        = var.db_allocated_storage
+  storage_type             = "gp2"
+  publicly_accessible      = false
+  multi_az                 = false
+  db_subnet_group_name     = aws_db_subnet_group.db_monitor_subnet_group.name
+  vpc_security_group_ids   = [aws_security_group.db_monitor_sg.id]
+
+  username                 = "admin"
+  password                 = var.db_password
+  apply_immediately        = true
+
+  auto_minor_version_upgrade = true
+  storage_encrypted          = true
+  skip_final_snapshot        = true
+}
+
+# Security Group for RDS
+resource "aws_security_group" "db_monitor_sg" {
+  name   = "db_monitor_rds_sg"
+  vpc_id = aws_vpc.db_monitor_vpc.id
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# DB Subnet Group
+resource "aws_db_subnet_group" "db_monitor_subnet_group" {
+  name       = "db-monitor-subnet-group"
+  subnet_ids = [aws_subnet.private_subnet_a.id, aws_subnet.private_subnet_b.id]
+
+  tags = {
+    Name = "db-monitor-subnet-group"
+  }
+}
