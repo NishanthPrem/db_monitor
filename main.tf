@@ -97,3 +97,9 @@ resource "aws_db_subnet_group" "db_monitor_subnet_group" {
     Name = "db-monitor-subnet-group"
   }
 }
+
+# ECS Cluster
+
+resource "aws_ecs_cluster" "db_monitor_cluster" {
+  name = "db_monitor_cluster"
+}
