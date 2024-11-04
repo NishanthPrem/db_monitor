@@ -63,3 +63,9 @@ variable "db_password" {
   type        = string
   sensitive   = true
 }
+
+variable "my_ip" {
+  description = "Your public IP address for phpMyAdmin access"
+  type        = string
+  default = "68.99.200.119/32"
+}

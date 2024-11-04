@@ -99,7 +99,223 @@ resource "aws_db_subnet_group" "db_monitor_subnet_group" {
 }
 
 # ECS Cluster
-
 resource "aws_ecs_cluster" "db_monitor_cluster" {
   name = "db_monitor_cluster"
+}
+
+# Default Security Group for ECS Cluster
+resource "aws_security_group" "ecs_default_sg" {
+  name_prefix = "ecs-default-sg"
+  vpc_id      = aws_vpc.db_monitor_vpc.id
+
+  # Allow all outbound traffic
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "ecs-default-security-group"
+  }
+}
+
+# EC2 Instance for ECS
+resource "aws_instance" "ecs_instance" {
+  ami               = "ami-00f7e5c52c0f43726"
+  instance_type     = "t2.micro"
+  subnet_id         = aws_subnet.public_subnet_a.id
+  security_groups   = [aws_security_group.ecs_default_sg.id]
+  iam_instance_profile = aws_iam_instance_profile.ecs_agent.name
+
+  associate_public_ip_address = null
+
+  user_data = base64encode(<<-EOF
+              #!/bin/bash
+              echo ECS_CLUSTER=${aws_ecs_cluster.db_monitor_cluster.name} >> /etc/ecs/ecs.config
+              EOF
+  )
+
+  tags = {
+    Name = "ecs-instance"
+  }
+}
+
+# IAM Role for ECS
+resource "aws_iam_role" "ecs_agent" {
+  name = "ecs-agent"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+# Attach ECS Policy to Role
+resource "aws_iam_role_policy_attachment" "ecs_agent" {
+  role       = aws_iam_role.ecs_agent.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
+}
+
+# Create Instance Profile
+resource "aws_iam_instance_profile" "ecs_agent" {
+  name = "ecs-agent"
+  role = aws_iam_role.ecs_agent.name
+}
+
+# Update RDS Security Group to allow access from ECS instances
+resource "aws_security_group_rule" "rds_ingress" {
+  type                     = "ingress"
+  from_port                = 3306
+  to_port                  = 3306
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.ecs_default_sg.id
+  security_group_id        = aws_security_group.db_monitor_sg.id
+}
+
+# Task Definition for phpMyAdmin
+resource "aws_ecs_task_definition" "phpmyadmin" {
+  family                = "td-phpmyadmin"
+  container_definitions = jsonencode([
+    {
+      name         = "phpmyadmin"
+      image        = "docker.io/phpmyadmin:latest"
+      cpu          = 224
+      memory       = 182
+      essential    = true
+      
+      portMappings = [
+        {
+          containerPort = 80
+          hostPort     = 8080
+          protocol     = "tcp"
+        }
+      ]
+
+      environment = [
+        {
+          name  = "PMA_HOST"
+          value = aws_db_instance.db_monitor_rds.endpoint
+        }
+      ]
+
+      mountPoints = []
+      volumesFrom = []
+    }
+  ])
+
+  # Use EC2 launch type
+  requires_compatibilities = ["EC2"]
+  network_mode            = "bridge"  # Default for Linux EC2 instances
+  
+  # Task-level resource limits
+  memory = 182  # MiB
+  cpu    = 224  # CPU units
+}
+
+# Update ECS security group to allow inbound traffic on port 8080
+resource "aws_security_group_rule" "ecs_phpmyadmin_ingress" {
+  type              = "ingress"
+  from_port         = 8080
+  to_port           = 8080
+  protocol          = "tcp"
+  cidr_blocks       = [var.my_ip]  # Replace with your IP
+  security_group_id = aws_security_group.ecs_default_sg.id
+  description       = "Allow phpMyAdmin access from my IP"
+}
+
+# ECS Service for phpMyAdmin
+resource "aws_ecs_service" "phpmyadmin" {
+  name            = "phpmyadmin"
+  cluster         = aws_ecs_cluster.db_monitor_cluster.id
+  task_definition = aws_ecs_task_definition.phpmyadmin.arn
+  desired_count   = 1
+  
+  # Use EC2 launch type
+  launch_type = "EC2"
+}
+
+# EFS File System for Metabase
+resource "aws_efs_file_system" "metabase_efs" {
+  lifecycle_policy {
+    transition_to_ia = "AFTER_30_DAYS"
+  }
+
+  tags = {
+    Name = "metabase-efs"
+  }
+}
+
+# EFS Mount Targets in both subnets
+resource "aws_efs_mount_target" "metabase_mount_a" {
+  file_system_id  = aws_efs_file_system.metabase_efs.id
+  subnet_id       = aws_subnet.private_subnet_a.id
+  security_groups = [aws_security_group.db_monitor_sg.id]
+}
+
+resource "aws_efs_mount_target" "metabase_mount_b" {
+  file_system_id  = aws_efs_file_system.metabase_efs.id
+  subnet_id       = aws_subnet.private_subnet_b.id
+  security_groups = [aws_security_group.db_monitor_sg.id]
+}
+
+# Task Definition for Metabase
+resource "aws_ecs_task_definition" "metabase" {
+  family                   = "td-metabase"
+  container_definitions    = jsonencode([{
+    name                   = "metabase"
+    image                  = "metabase/metabase:latest"
+    cpu                    = 800
+    memory                 = 800
+    essential              = true
+
+    portMappings = [
+      {
+        containerPort     = 3000
+        hostPort          = 3000
+        protocol          = "tcp"
+      }
+    ]
+
+    mountPoints = [
+      {
+        sourceVolume      = "efs-storage"
+        containerPath     = "/metabase-data"
+        readOnly          = false
+      }
+    ]
+  }])
+
+
+  requires_compatibilities = ["EC2"]
+  network_mode             = "bridge"
+}
+
+# Security Group rule for Metabase access
+resource "aws_security_group_rule" "metabase_ingress" {
+  type              = "ingress"
+  from_port         = 3000
+  to_port           = 3000
+  protocol          = "tcp"
+  cidr_blocks       = [var.my_ip]  # Replace with your IP
+  security_group_id = aws_security_group.ecs_default_sg.id
+  description       = "Allow Metabase access from my IP"
+}
+
+# ECS Service for Metabase
+resource "aws_ecs_service" "metabase" {
+  name            = "metabase"
+  cluster         = aws_ecs_cluster.db_monitor_cluster.id
+  task_definition = aws_ecs_task_definition.metabase.arn
+  desired_count   = 1
+  launch_type     = "EC2"
 }
